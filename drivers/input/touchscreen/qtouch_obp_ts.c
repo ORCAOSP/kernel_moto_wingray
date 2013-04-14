@@ -30,57 +30,8 @@
 #include <linux/slab.h>
 #include <linux/firmware.h>
 #include <linux/regulator/consumer.h>
-#include "../../../kernel/power/power.h"
 
 #define IGNORE_CHECKSUM_MISMATCH
-
-
-/** s2w defs **/
-
-static struct input_dev *sweep2wake_pwrdev;
-static DEFINE_MUTEX(s2w_lock);
-static unsigned int wake_start_x = 0;
-static unsigned int wake_start_y = 0;
-static unsigned int sleep_start_x = 1280;
-static unsigned int sleep_start_y = 800;
-static unsigned int x_lo;
-static unsigned int x_hi;
-static unsigned int y_lo;
-static unsigned int y_hi;
-bool s2w_enabled = true;
-
-void sweep2wake_setdev(struct input_dev * input_device) {
-	sweep2wake_pwrdev = input_device;
-	return;
-}
-
-EXPORT_SYMBOL(sweep2wake_setdev);
-
-static void sweep2wake_presspwr(struct work_struct *sweep2wake_presspwr_work)
-{
-	pr_alert("SWEEP2WAKE_PRESSPWR");
-		input_event(sweep2wake_pwrdev, EV_KEY, KEY_END, 1);
-		input_event(sweep2wake_pwrdev, EV_SYN, 0, 0);
-		msleep(20);
-		input_event(sweep2wake_pwrdev, EV_KEY, KEY_END, 0);
-		input_event(sweep2wake_pwrdev, EV_SYN, 0, 0);
-		msleep(20);
-	mutex_unlock(&s2w_lock);
-}
-
-static DECLARE_WORK(sweep2wake_presspwr_work, sweep2wake_presspwr);
-
-void sweep2wake_pwrtrigger(void)
-{
-	if (mutex_trylock(&s2w_lock)) {
-		schedule_work(&sweep2wake_presspwr_work);
-	}
-	else {
-		pr_alert("SWEEP2WAKE_PWRTRIGGER_NO");
-	}
-}
-
-/** end s2w defs **/
 
 struct qtm_object {
 	struct qtm_obj_entry		entry;
@@ -954,48 +905,6 @@ static int do_touch_multi_msg(struct qtouch_ts_data *ts, struct qtm_object *obj,
 		input_mt_sync(ts->input_dev);
 	input_sync(ts->input_dev);
 
-	/** s2w **/
-
-	/* I started making this directional, so that sweeping right to left wakes the device and sweeping left to right puts it to sleep.  However, this is not fully implemented. */
-	if (s2w_enabled && num_fingers_down == 1) {
-			if ( x < x_lo) {	
-				wake_start_x = 1;
-			}
-			if (y < y_lo) {
-				wake_start_y = 1;
-			}
-			if ( x > x_hi) {	
-				sleep_start_x = 1;
-			}
-			if (y > y_hi) {
-				sleep_start_y = 1;
-			}
-	}
-	else
-	{
-		wake_start_x = 0;
-		wake_start_y = 0;
-		sleep_start_x = 0;
-		sleep_start_y = 0;
-	}
-	
-	if ((sleep_start_x == 1 && x < x_lo) || (sleep_start_y == 1 && y < y_lo))
-	{
-		wake_start_x = 0;
-		wake_start_y = 0;
-		sleep_start_x = 0;
-		sleep_start_y = 0;
-		sweep2wake_pwrtrigger();
-	}
-	if ((wake_start_x == 1 && x > x_hi) || (wake_start_y == 1 && y > y_hi))
-	{
-		wake_start_x = 0;
-		wake_start_y = 0;
-		sleep_start_x = 0;
-		sleep_start_y = 0;
-		sweep2wake_pwrtrigger();
-	}
-
 	return 0;
 }
 
@@ -1673,42 +1582,12 @@ static ssize_t qtouch_fw_version(struct device *dev,
 
 static DEVICE_ATTR(fw_version, 0644, qtouch_fw_version, NULL);
 
-/** s2w sysfs **/
-static ssize_t sweep2wake_show(struct device *dev,
-				  struct device_attribute *attr, char *buf)
-{
-	return sprintf(buf, "%d\n", s2w_enabled);
-}
-
-static ssize_t sweep2wake_store(struct device *dev,
-				   struct device_attribute *attr,
-				   const char *buf, size_t size)
-{
-	int ret;
-	unsigned int value;
-
-	ret = sscanf(buf, "%d\n", &value);
-
-	if (ret != 1)
-		return -EINVAL;
-	else
-		s2w_enabled = value ? true : false;
-
-	return size;
-}
-
-static DEVICE_ATTR(sweep2wake, (S_IWUSR|S_IRUGO), sweep2wake_show, sweep2wake_store);
-
-static struct kobject *android_touch_kobj;
-
-/** s2w sysfs end **/
-
 static int qtouch_ts_probe(struct i2c_client *client,
 			   const struct i2c_device_id *id)
 {
 	struct qtouch_ts_platform_data *pdata = client->dev.platform_data;
 	struct qtouch_ts_data *ts;
-	int err, ret;
+	int err;
 	unsigned char boot_info;
 	int loop_count;
 
@@ -1928,20 +1807,6 @@ finish_touch_setup:
 		goto err_create_fw_version_file_failed;
 	}
 
-	/** s2w **/
-	android_touch_kobj = kobject_create_and_add("android_touch", NULL);
-	if (android_touch_kobj == NULL) {
-		printk(KERN_ERR "[TP] TOUCH_ERR: %s: subsystem_register failed\n", __func__);
-		ret = -ENOMEM;
-		return ret;
-	}
-	ret = sysfs_create_file(android_touch_kobj, &dev_attr_sweep2wake.attr);
-	if (ret) {
-		printk(KERN_ERR "%s: sysfs_create_file failed\n", __func__);
-		return ret;
-	}
-	/** s2w end **/
-
 	ts->regulator = regulator_get(&ts->client->dev, "vio");
 	if (!IS_ERR_OR_NULL(ts->regulator))
 		regulator_enable(ts->regulator);
@@ -1952,13 +1817,6 @@ finish_touch_setup:
 	ts->early_suspend.resume = qtouch_ts_late_resume;
 	register_early_suspend(&ts->early_suspend);
 #endif
-
-	/** s2w **/
-	x_lo = ts->pdata->abs_max_x / 20;		/* 5% display width */
-	x_hi = (ts->pdata->abs_max_x / 20) * 19;	/* 95% display width */
-	y_lo = ts->pdata->abs_max_y / 20;		/* 5% display width */
-	y_hi = (ts->pdata->abs_max_y / 20) * 19;	/* 95% display width */
-	/** s2w end **/
 
 	return 0;
 
@@ -1987,15 +1845,10 @@ static int qtouch_ts_remove(struct i2c_client *client)
 
 	if (!IS_ERR_OR_NULL(ts->regulator))
 		regulator_put(ts->regulator);
-	
+
 	device_remove_file(&ts->client->dev, &dev_attr_irq_enable);
 	device_remove_file(&ts->client->dev, &dev_attr_update_status);
 	device_remove_file(&ts->client->dev, &dev_attr_fw_version);
-
-	/** s2w **/
-	sysfs_remove_file(android_touch_kobj, &dev_attr_sweep2wake.attr);
-	kobject_del(android_touch_kobj);
-	/** s2w end **/
 
 	unregister_early_suspend(&ts->early_suspend);
 	free_irq(ts->client->irq, ts);
@@ -2018,28 +1871,20 @@ static int qtouch_ts_suspend(struct i2c_client *client, pm_message_t mesg)
 	if (ts->mode == 1)
 		return -EBUSY;
 
+	if (ts->enable_irq_flag)
+		disable_irq(ts->client->irq);
 	ret = cancel_work_sync(&ts->work);
 	if (ret) { /* if work was pending disable-count is now 2 */
 		pr_info("%s: Pending work item\n", __func__);
 		enable_irq(ts->client->irq);
 	}
 
-	/** s2w **/
-	if (s2w_enabled)	
-		enable_irq_wake(ts->client->irq);
-	else {
-		if (ts->enable_irq_flag)
-			disable_irq(ts->client->irq);
-	}
+	ret = qtouch_power_config(ts, 0);
+	if (ret < 0)
+		pr_err("%s: Cannot write power config\n", __func__);
 
-	if (!s2w_enabled) {
-		ret = qtouch_power_config(ts, 0);
-		if (ret < 0)
-			pr_err("%s: Cannot write power config\n", __func__);
-
-		if (ts->pdata->hw_suspend)
-			ts->pdata->hw_suspend(1);
-	}
+	if (ts->pdata->hw_suspend)
+		ts->pdata->hw_suspend(1);
 
 	if (!IS_ERR_OR_NULL(ts->regulator))
 		regulator_disable(ts->regulator);
@@ -2110,14 +1955,8 @@ static int qtouch_ts_resume(struct i2c_client *client)
 		return -EIO;
 	}
 
-	/** s2w **/
-	if (s2w_enabled)
-		disable_irq_wake(ts->client->irq);
-	else {
-		enable_irq(ts->client->irq);
-		ts->enable_irq_flag = 1;
-	}
-
+	enable_irq(ts->client->irq);
+	ts->enable_irq_flag = 1;
 	return 0;
 }
 

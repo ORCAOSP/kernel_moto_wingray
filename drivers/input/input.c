@@ -37,9 +37,6 @@ MODULE_LICENSE("GPL");
 static LIST_HEAD(input_dev_list);
 static LIST_HEAD(input_handler_list);
 
-/** s2w **/
-extern void sweep2wake_setdev(struct input_dev *input_device);
-
 /*
  * input_mutex protects access to both input_dev_list and input_handler_list.
  * This also causes input_[un]register_device and input_[un]register_handler
@@ -1906,12 +1903,6 @@ int input_register_device(struct input_dev *dev)
 
 	mutex_unlock(&input_mutex);
 
-	/** s2w **/
-	if(dev->name == "cpcap-key") {
-	sweep2wake_setdev(dev);	
-	pr_info("%s: SWEEP2WAKE device_set : %s registered\n", __FUNCTION__,dev->name);
-	}		
-	
 	return 0;
 }
 EXPORT_SYMBOL(input_register_device);
